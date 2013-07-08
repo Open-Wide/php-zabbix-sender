@@ -41,10 +41,7 @@ class Sender {
     
     function initData()
     {
-        $this->_data = array(
-            "request" => "sender data",
-            "data" => array()
-        );
+        $this->_data = array( );
     }
 
     function importAgentConfig(Agent\Config $agentConfig)
@@ -95,38 +92,47 @@ class Sender {
         if( isset($clock) ){
             $input{"clock"} = $clock;
         }
-        array_push($this->_data{"data"},$input);
+        array_push($this->_data,$input);
         return $this;
     }
     
     function getDataArray()
     {
-        return $this->_data{"data"};
+        return $this->_data;
     }
 
     private function _buildSendData(){
-        $json_data   = json_encode( array_map(
-                                        function($t){ return is_string($t) ? utf8_encode($t) : $t; },
-                                        $this->_data
-                                    ) 
+        $json_data_array = array();
+        $data = $this->_data;
+        while(!empty($data)) {
+            $tmp_data = array(
+                "request" => "sender data",
+                "data" => array_splice($data, 0, 10)
+            );
+            $json_data   = json_encode( array_map(
+                                            function($t){ return is_string($t) ? utf8_encode($t) : $t; },
+                                            $tmp_data
+                                        ) 
+                                    );
+            $json_length = strlen($json_data);
+            $data_header = pack("aaaaCCCCCCCCC",
+                                    substr($this->_protocolHeaderString,0,1),
+                                    substr($this->_protocolHeaderString,1,1),
+                                    substr($this->_protocolHeaderString,2,1),
+                                    substr($this->_protocolHeaderString,3,1),
+                                    intval($this->_protocolVersion),
+                                    ($json_length & 0xFF),
+                                    ($json_length & 0x00FF)>>8,
+                                    ($json_length & 0x0000FF)>>16,
+                                    ($json_length & 0x000000FF)>>24,
+                                    0x00,
+                                    0x00,
+                                    0x00,
+                                    0x00
                                 );
-        $json_length = strlen($json_data);
-        $data_header = pack("aaaaCCCCCCCCC",
-                                substr($this->_protocolHeaderString,0,1),
-                                substr($this->_protocolHeaderString,1,1),
-                                substr($this->_protocolHeaderString,2,1),
-                                substr($this->_protocolHeaderString,3,1),
-                                intval($this->_protocolVersion),
-                                ($json_length & 0xFF),
-                                ($json_length & 0x00FF)>>8,
-                                ($json_length & 0x0000FF)>>16,
-                                ($json_length & 0x000000FF)>>24,
-                                0x00,
-                                0x00,
-                                0x00,
-                                0x00
-                            );
-        return ($data_header . $json_data);
+            $json_data_array[] = $data_header . $json_data;
+        }
+        return $json_data_array;
     }
 
     protected function _parseResponseInfo($info=null){
@@ -250,49 +256,53 @@ class Sender {
      *
      */ 
     function send(){
-        $sendData = $this->_buildSendData();
-        $datasize = strlen($sendData);
- 
-        $this->_connect();
-      
-        /* send data to zabbix server */ 
-        $sentsize = $this->_write($this->_socket,$sendData);
-        if($sentsize === false or $sentsize != $datasize){
-            throw new SenderNetworkException('cannot receive response');
-        }
-        
-        /* receive data from zabbix server */ 
-        $recvData = $this->_read($this->_socket);
-        if($recvData === false){
-            throw new SenderNetworkException('cannot receive response');
-        }
-        
-        $this->_close();
-        
-        $recvProtocolHeader = substr($recvData,0,4);
-        if( $recvProtocolHeader == "ZBXD"){
-            $responseData               = substr($recvData,13);
-            $responseArray              = json_decode($responseData,true);
-            if(is_null($responseArray)){
-                throw new SenderProtocolException('invalid json data in receive data'); 
+        $this->_clearLastResponseData();
+        $sendDataArray = $this->_buildSendData();
+        $sendSucceed = TRUE;
+        foreach ($sendDataArray as $sendData) {
+            $datasize = strlen($sendData);
+     
+            $this->_connect();
+          
+            /* send data to zabbix server */ 
+            $sentsize = $this->_write($this->_socket,$sendData);
+            if($sentsize === false or $sentsize != $datasize){
+                throw new SenderNetworkException('cannot receive response');
             }
-            $this->_lastResponseArray   = $responseArray;
-            $this->_lastResponseInfo    = $responseArray{'info'}; 
-            $parsedInfo                 = $this->_parseResponseInfo($this->_lastResponseInfo); 
-            $this->_lastProcessed       = $parsedInfo{'processed'};
-            $this->_lastFailed          = $parsedInfo{'failed'};
-            $this->_lastSpent           = $parsedInfo{'spent'};
-            $this->_lastTotal           = $parsedInfo{'total'};
-            if($responseArray{'response'} == "success"){
-                $this->initData();
-                return true;
-            }else{
-                $this->_clearLastResponseData();
-                return false; 
+            
+            /* receive data from zabbix server */ 
+            $recvData = $this->_read($this->_socket);
+            if($recvData === false){
+                throw new SenderNetworkException('cannot receive response');
             }
+            
+            $this->_close();
+            
+            $recvProtocolHeader = substr($recvData,0,4);
+            if( $recvProtocolHeader == "ZBXD"){
+                $responseData               = substr($recvData,13);
+                $responseArray              = json_decode($responseData,true);
+                if(is_null($responseArray)){
+                    throw new SenderProtocolException('invalid json data in receive data'); 
+                }
+                $this->_lastResponseArray   = $responseArray;
+                $this->_lastResponseInfo    = $responseArray{'info'}; 
+                $parsedInfo                 = $this->_parseResponseInfo($this->_lastResponseInfo); 
+                $this->_lastProcessed       += $parsedInfo{'processed'};
+                $this->_lastFailed          += $parsedInfo{'failed'};
+                $this->_lastSpent           += $parsedInfo{'spent'};
+                $this->_lastTotal           += $parsedInfo{'total'};
+                if($responseArray{'response'} != "success"){
+                    $sendSucceed = FALSE;
+                }
+            }
+        }
+        if($sendSucceed){
+            $this->initData();
+            return true;
         }else{
             $this->_clearLastResponseData();
-            throw new SenderProtocolException('invalid protocol header in receive data'); 
+            return false;
         }
     }
 }

@@ -118,8 +118,7 @@ class Sender {
             $request .= pack( "C", $i );
         }
         $request .= $json_data;
-        $request_array[] = $request;
-        return $request_array;
+        return $request;
     }
 
     protected function _parseResponseInfo( $info = null ) {
@@ -243,49 +242,48 @@ class Sender {
      */
     function send( ) {
         $this->_clearLastResponseData( );
-        $sendDataArray = $this->_buildSendData( );
+        $sendData = $this->_buildSendData( );
         $sendSucceed = TRUE;
-        foreach( $sendDataArray as $sendData ) {
-            $datasize = strlen( $sendData );
+        
+        $datasize = strlen( $sendData );
 
-            $this->_connect( );
+        $this->_connect( );
 
-            /* send data to zabbix server */
-            $sentsize = $this->_write( $sendData );
-            if( $sentsize === false or $sentsize != $datasize ) {
-                throw new SenderNetworkException( 'cannot receive response' );
+        /* send data to zabbix server */
+        $sentsize = $this->_write( $sendData );
+        if( $sentsize === false or $sentsize != $datasize ) {
+            throw new SenderNetworkException( 'cannot receive response' );
+        }
+
+        /* receive data from zabbix server */
+        $recvData = $this->_read( );
+        if( $recvData === false ) {
+            throw new SenderNetworkException( 'cannot receive response' );
+        }
+
+        $this->_close( );
+
+        $recvProtocolHeader = substr( $recvData, 0, 4 );
+        if( $recvProtocolHeader == "ZBXD" ) {
+            $responseData = substr( $recvData, 13 );
+            $responseArray = json_decode( $responseData, true );
+            if( is_null( $responseArray ) ) {
+                throw new SenderProtocolException( 'invalid json data in receive data' );
             }
-
-            /* receive data from zabbix server */
-            $recvData = $this->_read( );
-            if( $recvData === false ) {
-                throw new SenderNetworkException( 'cannot receive response' );
+            $this->_lastResponseArray = $responseArray;
+            $this->_lastResponseInfo = $responseArray{'info'};
+            $parsedInfo = $this->_parseResponseInfo( $this->_lastResponseInfo );
+            $this->_lastProcessed = $parsedInfo{'processed'};
+            $this->_lastFailed = $parsedInfo{'failed'};
+            $this->_lastSpent = $parsedInfo{'spent'};
+            $this->_lastTotal = $parsedInfo{'total'};
+            if( $responseArray{'response'} != "success" ) {
+                $sendSucceed = FALSE;
             }
-
-            $this->_close( );
-
-            $recvProtocolHeader = substr( $recvData, 0, 4 );
-            if( $recvProtocolHeader == "ZBXD" ) {
-                $responseData = substr( $recvData, 13 );
-                $responseArray = json_decode( $responseData, true );
-                if( is_null( $responseArray ) ) {
-                    throw new SenderProtocolException( 'invalid json data in receive data' );
-                }
-                $this->_lastResponseArray = $responseArray;
-                $this->_lastResponseInfo = $responseArray{'info'};
-                $parsedInfo = $this->_parseResponseInfo( $this->_lastResponseInfo );
-                $this->_lastProcessed += $parsedInfo{'processed'};
-                $this->_lastFailed += $parsedInfo{'failed'};
-                $this->_lastSpent += $parsedInfo{'spent'};
-                $this->_lastTotal += $parsedInfo{'total'};
-                if( $responseArray{'response'} != "success" ) {
-                    $sendSucceed = FALSE;
-                }
-            } elseif( $recvProtocolHeader == "OK" ) {
-                throw new SenderNetworkException( 'Request is too long. Request size : ' . $sentsize );
-            } else {
-                throw new SenderNetworkException( 'Invalid response : ' . $recvProtocolHeader );
-            }
+        } elseif( $recvProtocolHeader == "OK" ) {
+            throw new SenderNetworkException( 'Request is too long. Request size : ' . $sentsize );
+        } else {
+            throw new SenderNetworkException( 'Invalid response : ' . $recvProtocolHeader );
         }
         if( $sendSucceed ) {
             $this->initData( );
